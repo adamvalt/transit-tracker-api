@@ -66,6 +66,31 @@
                       "type": "boolean",
                       "description": "If enabled, GTFS-RT trip updates will be matched using a substring of `trip_id` rather than an exact match.",
                       "default": false
+                    },
+                    "realtimeStopIdRewrite": {
+                      "type": "object",
+                      "description": "If set, stop IDs in GTFS-RT trip updates and vehicle positions are rewritten with this regular expression before being matched against the static feed. Useful when the realtime feed formats stop IDs differently (e.g. zero-padded).",
+                      "properties": {
+                        "pattern": {
+                          "type": "string",
+                          "description": "JavaScript regular expression to match against each stop ID.",
+                          "examples": [
+                            "^U0*(\\d+)Z0*(\\d+)$"
+                          ]
+                        },
+                        "replacement": {
+                          "type": "string",
+                          "description": "Replacement string; may reference capture groups like `$1`.",
+                          "examples": [
+                            "U$1Z$2"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "pattern",
+                        "replacement"
+                      ],
+                      "additionalProperties": false
                     }
                   }
                 },
@@ -75,6 +100,37 @@
                 },
                 "rtTripUpdates": {
                   "description": "Optional reference to a GTFS-RT Trip Updates feed. Will supply real-time data if available.\n\nMultiple may be specified, in which case their results will be merged.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/HttpRequestOptionsOrUrl"
+                    },
+                    {
+                      "type": "array",
+                      "items": {
+                        "allOf": [
+                          {
+                            "$ref": "#/$defs/HttpRequestOptions",
+                            "additionalProperties": true
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "routeIds": {
+                                "type": "array",
+                                "description": "If specified, this GTFS-RT feed will only be requested for these route IDs. This is useful if multiple GTFS-RT feeds are specified and each only covers a subset of routes.",
+                                "items": {
+                                  "type": "string"
+                                }
+                              }
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                },
+                "rtVehiclePositions": {
+                  "description": "Optional reference to a GTFS-RT Vehicle Positions feed. Delays are estimated by comparing each vehicle's position with the static schedule, for agencies that don't publish Trip Updates. Trip Updates take precedence where both are available.\n\nMultiple may be specified, in which case their results will be merged.",
                   "anyOf": [
                     {
                       "$ref": "#/$defs/HttpRequestOptionsOrUrl"

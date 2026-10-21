@@ -254,6 +254,7 @@ describe("GTFS E2E test", () => {
     describe("with GTFS-RT updates", () => {
       afterEach(() => {
         fakeGtfs.setTripUpdates([])
+        fakeGtfs.setVehiclePositions([])
         fakeGtfs.setSimulateTripUpdatesFailure(false)
       })
 
@@ -612,6 +613,110 @@ describe("GTFS E2E test", () => {
         expect(trips.some((trip) => trip.tripId === "testfeed:AAMV1")).toBe(
           false,
         )
+      })
+
+      describe("estimated from vehicle positions", () => {
+        // STBA departs STAGECOACH at 06:00 and arrives at BEATTY_AIRPORT at
+        // 06:20 local time (14:00Z and 14:20Z)
+        const stbaAtBeatty = "testfeed:STBA,testfeed:BEATTY_AIRPORT"
+        const halfwayToBeatty = { latitude: 36.892064, longitude: -116.76813 }
+
+        test("with vehicle in transit", async () => {
+          mockDateTimeNow.mockReturnValue(new Date("2008-01-04T14:15:00Z"))
+
+          fakeGtfs.setVehiclePositions([
+            {
+              trip: { tripId: "STBA" },
+              stopId: "BEATTY_AIRPORT",
+              currentStatus:
+                GtfsRt.VehiclePosition.VehicleStopStatus.IN_TRANSIT_TO,
+              position: halfwayToBeatty,
+              timestamp: 1199456100, // 14:15Z
+              vehicle: { id: "5097", label: "411" },
+            },
+          ])
+
+          const trips = await getTripSchedule(stbaAtBeatty)
+          const trip = trips.find((trip) => trip.tripId === "testfeed:STBA")
+
+          // Halfway there at 06:15 instead of 06:10, so 5 minutes late
+          expect(trip).toBeDefined()
+          expect(trip!.arrivalTime).toBe(1199456400 + 300)
+          expect(trip!.departureTime).toBe(1199456400 + 300)
+          expect(trip!.vehicle).toBe("411")
+          expect(trip!.isRealtime).toBe(true)
+        })
+
+        test("with vehicle stopped at a previous stop with a rewritten stop ID", async () => {
+          mockDateTimeNow.mockReturnValue(new Date("2008-01-04T14:02:00Z"))
+
+          fakeGtfs.setVehiclePositions([
+            {
+              trip: { tripId: "STBA" },
+              stopId: "PADDED_STAGECOACH",
+              currentStatus:
+                GtfsRt.VehiclePosition.VehicleStopStatus.STOPPED_AT,
+              timestamp: 1199455320, // 14:02Z
+              vehicle: { id: "5097", label: "411" },
+            },
+          ])
+
+          const trips = await getTripSchedule(stbaAtBeatty)
+          const trip = trips.find((trip) => trip.tripId === "testfeed:STBA")
+
+          // Still at the first stop 2 minutes after it should have left
+          expect(trip).toBeDefined()
+          expect(trip!.arrivalTime).toBe(1199456400 + 120)
+          expect(trip!.vehicle).toBe("411")
+          expect(trip!.isRealtime).toBe(true)
+        })
+
+        test("prefers trip updates over vehicle positions", async () => {
+          mockDateTimeNow.mockReturnValue(new Date("2008-01-04T14:15:00Z"))
+
+          fakeGtfs.setTripUpdates([
+            {
+              trip: { tripId: "STBA", startDate: "20080104" },
+              stopTimeUpdate: [
+                { stopId: "BEATTY_AIRPORT", arrival: { delay: 60 } },
+              ],
+            },
+          ])
+
+          fakeGtfs.setVehiclePositions([
+            {
+              trip: { tripId: "STBA" },
+              stopId: "BEATTY_AIRPORT",
+              position: halfwayToBeatty,
+              timestamp: 1199456100,
+            },
+          ])
+
+          const trips = await getTripSchedule(stbaAtBeatty)
+          const trip = trips.find((trip) => trip.tripId === "testfeed:STBA")
+
+          expect(trip!.arrivalTime).toBe(1199456400 + 60)
+          expect(trip!.isRealtime).toBe(true)
+        })
+
+        test("ignores stale vehicle positions", async () => {
+          mockDateTimeNow.mockReturnValue(new Date("2008-01-04T14:15:00Z"))
+
+          fakeGtfs.setVehiclePositions([
+            {
+              trip: { tripId: "STBA" },
+              stopId: "BEATTY_AIRPORT",
+              position: halfwayToBeatty,
+              timestamp: 1199456100 - 600,
+            },
+          ])
+
+          const trips = await getTripSchedule(stbaAtBeatty)
+          const trip = trips.find((trip) => trip.tripId === "testfeed:STBA")
+
+          expect(trip!.arrivalTime).toBe(1199456400)
+          expect(trip!.isRealtime).toBe(false)
+        })
       })
 
       test("with update to overnight trip (crossing midnight)", async () => {

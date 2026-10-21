@@ -11,6 +11,14 @@ feeds:
         url: http://127.0.0.1:3123/gtfs-rt/trip-updates
         headers:
           Authorization: fake-auth
+      rtVehiclePositions:
+        url: http://127.0.0.1:3123/gtfs-rt/vehicle-positions
+        headers:
+          Authorization: fake-auth
+      quirks:
+        realtimeStopIdRewrite:
+          pattern: "^PADDED_(.+)$"
+          replacement: "$1"
   testfeed2:
     name: Test Feed 2
     description: Test Feed 2 Description
