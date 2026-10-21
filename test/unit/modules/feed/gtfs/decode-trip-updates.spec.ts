@@ -1,7 +1,10 @@
 import { transit_realtime as GtfsRt } from "gtfs-realtime-bindings"
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
-import { decodeTripUpdatesOnly } from "src/modules/feed/modules/gtfs/decode-trip-updates"
+import {
+  decodeTripUpdatesOnly,
+  decodeVehiclePositionsOnly,
+} from "src/modules/feed/modules/gtfs/decode-trip-updates"
 import { describe, expect, it } from "vitest"
 
 function encodeFeedMessage(entities: GtfsRt.IFeedEntity[]): Uint8Array {
@@ -206,5 +209,56 @@ describe("decodeTripUpdatesOnly", () => {
     expect(truncated).toBe(true)
     expect(tripUpdates.length).toBe(357)
     expect(tripUpdates.every((tu) => tu.trip?.tripId)).toBe(true)
+  })
+})
+
+describe("decodeVehiclePositionsOnly", () => {
+  it("should decode vehicle position entities and the feed timestamp", () => {
+    const message = new GtfsRt.FeedMessage({
+      header: {
+        gtfsRealtimeVersion: "2.0",
+        incrementality: GtfsRt.FeedHeader.Incrementality.FULL_DATASET,
+        timestamp: 1792600810,
+      },
+      entity: [
+        {
+          id: "1",
+          vehicle: {
+            trip: { tripId: "32881" },
+            position: { latitude: 49.1763, longitude: 16.6216 },
+            currentStatus:
+              GtfsRt.VehiclePosition.VehicleStopStatus.IN_TRANSIT_TO,
+            timestamp: 1792600804,
+            stopId: "U01266Z02",
+            vehicle: { id: "10880", label: "1088" },
+          },
+        },
+        {
+          id: "2",
+          tripUpdate: { trip: { tripId: "trip-1" } },
+        },
+      ],
+    })
+    const data = GtfsRt.FeedMessage.encode(message).finish()
+
+    const { vehiclePositions, feedTimestamp, truncated } =
+      decodeVehiclePositionsOnly(data)
+
+    expect(truncated).toBe(false)
+    expect(feedTimestamp).toBe(1792600810)
+    expect(vehiclePositions).toHaveLength(1)
+    expect(vehiclePositions[0].trip?.tripId).toBe("32881")
+    expect(vehiclePositions[0].stopId).toBe("U01266Z02")
+    expect(vehiclePositions[0].timestamp).toBe(1792600804)
+    expect(vehiclePositions[0].vehicle?.label).toBe("1088")
+  })
+
+  it("should skip trip update entities", () => {
+    const data = encodeFeedMessage([
+      { id: "1", tripUpdate: { trip: { tripId: "trip-1" } } },
+    ])
+
+    const { vehiclePositions } = decodeVehiclePositionsOnly(data)
+    expect(vehiclePositions).toHaveLength(0)
   })
 })

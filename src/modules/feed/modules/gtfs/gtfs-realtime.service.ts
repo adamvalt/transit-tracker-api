@@ -6,17 +6,27 @@ import ms from "ms"
 import { MetricService } from "nestjs-otel"
 import { PinoLogger } from "nestjs-pino"
 import { env } from "src/env"
+import { DateTimeService } from "src/modules/datetime/datetime.service"
 import { DeepReadonly } from "ts-essentials"
 import { FEED_CONTEXT } from "../../feed-context"
 import type { FeedContext } from "../../interfaces/feed-provider.interface"
 import { FeedCacheService } from "../feed-cache/feed-cache.service"
 import type { FetchConfig, GtfsConfig } from "./config"
-import { decodeTripUpdatesOnly } from "./decode-trip-updates"
+import {
+  decodeTripUpdatesOnly,
+  decodeVehiclePositionsOnly,
+} from "./decode-trip-updates"
+import { GtfsDbService } from "./gtfs-db.service"
 import { UpstreamHttpError } from "./gtfs.errors"
 import { IGetScheduleForRouteAtStopResult } from "./queries/list-schedule-for-route.queries"
+import { listVehicleStopTimes } from "./queries/list-vehicle-stop-times.queries"
+import { tripUpdateFromVehiclePosition } from "./vehicle-position-delay"
 
 type ITripUpdate = GtfsRt.ITripUpdate
 type IStopTimeUpdate = GtfsRt.TripUpdate.IStopTimeUpdate
+
+// Vehicles that haven't reported in this long are probably out of service
+const MAX_VEHICLE_POSITION_AGE_MS = ms("5m")
 
 export type TripUpdateIndex = Map<
   string,
@@ -30,15 +40,27 @@ export class GtfsRealtimeService {
   private readonly requestsCounter: Counter
   private readonly failuresCounter: Counter
   private readonly partialDecodesCounter: Counter
+  private readonly stopIdRewrite: {
+    pattern: RegExp
+    replacement: string
+  } | null
 
   constructor(
     @Inject(FEED_CONTEXT) { feedCode, config }: FeedContext<GtfsConfig>,
     private readonly cache: FeedCacheService,
+    private readonly db: GtfsDbService,
+    private readonly dateTime: DateTimeService,
     metricService: MetricService,
     private readonly logger: PinoLogger,
   ) {
     this.feedCode = feedCode
     this.config = config
+    this.stopIdRewrite = config.quirks?.realtimeStopIdRewrite
+      ? {
+          pattern: new RegExp(config.quirks.realtimeStopIdRewrite.pattern),
+          replacement: config.quirks.realtimeStopIdRewrite.replacement,
+        }
+      : null
     this.logger.setContext(`${GtfsRealtimeService.name}[${feedCode}]`)
 
     this.requestsCounter = metricService.getCounter("gtfs_realtime_requests", {
@@ -64,13 +86,48 @@ export class GtfsRealtimeService {
   async getTripUpdates(
     routeIds?: string[],
   ): Promise<ReadonlyArray<DeepReadonly<ITripUpdate>>> {
-    if (!this.config.rtTripUpdates) {
+    const [tripUpdates, vehicleTripUpdates] = await Promise.all([
+      this.fetchRealtimeFeeds(
+        this.config.rtTripUpdates,
+        routeIds,
+        "tripUpdates",
+        async (data, url) => this.decodeTripUpdates(data, url),
+      ),
+      this.fetchRealtimeFeeds(
+        this.config.rtVehiclePositions,
+        routeIds,
+        "vehiclePositions",
+        (data, url) => this.tripUpdatesFromVehiclePositions(data, url),
+      ),
+    ])
+
+    if (vehicleTripUpdates.length === 0) {
+      return tripUpdates
+    }
+
+    // Trip updates published by the agency take precedence over our estimates
+    const tripIdsWithUpdates = new Set(tripUpdates.map((u) => u.trip?.tripId))
+    return [
+      ...tripUpdates,
+      ...vehicleTripUpdates.filter(
+        (u) => !tripIdsWithUpdates.has(u.trip?.tripId),
+      ),
+    ]
+  }
+
+  private async fetchRealtimeFeeds<T>(
+    feedConfig: GtfsConfig["rtTripUpdates"],
+    routeIds: string[] | undefined,
+    cacheKeyPrefix: string,
+    decode: (data: Uint8Array, url: string) => Promise<T[]>,
+  ): Promise<ReadonlyArray<DeepReadonly<T>>> {
+    if (!feedConfig) {
       return []
     }
 
     let fetchConfigs: FetchConfig[] = []
-    if (Array.isArray(this.config.rtTripUpdates)) {
-      fetchConfigs = this.config.rtTripUpdates.filter((config) => {
+    if (Array.isArray(feedConfig)) {
+      fetchConfigs = feedConfig.filter((config) => {
         if (!config.routeIds || config.routeIds.length === 0) {
           return true
         }
@@ -81,8 +138,8 @@ export class GtfsRealtimeService {
 
         return config.routeIds.some((routeId) => routeIds.includes(routeId))
       })
-    } else if (typeof this.config.rtTripUpdates === "object") {
-      fetchConfigs = [this.config.rtTripUpdates]
+    } else if (typeof feedConfig === "object") {
+      fetchConfigs = [feedConfig]
     }
 
     if (fetchConfigs.length === 0) {
@@ -90,10 +147,12 @@ export class GtfsRealtimeService {
     }
 
     const minCacheAgeMs = env.duration("GTFS_RT_MIN_CACHE_AGE", -1)
+    // Some agencies send day-long max-ages on realtime feeds (e.g. IDS JMK)
+    const maxCacheAgeMs = env.duration("GTFS_RT_MAX_CACHE_AGE", ms("5m"))
 
     const responses = await Promise.allSettled(
       fetchConfigs.map((config) =>
-        this.cache.cached(`tripUpdates-${config.url}`, async () => {
+        this.cache.cached(`${cacheKeyPrefix}-${config.url}`, async () => {
           this.requestsCounter.add(1, {
             feed_code: this.feedCode,
           })
@@ -138,23 +197,14 @@ export class GtfsRealtimeService {
             }
 
             const arrayBuffer = await resp.arrayBuffer()
-            const { tripUpdates, truncated } = decodeTripUpdatesOnly(
-              new Uint8Array(arrayBuffer),
-            )
-
-            if (truncated) {
-              this.logger.warn(
-                { url: config.url, entitiesRecovered: tripUpdates.length },
-                "GTFS-RT response was truncated; using partially decoded trip updates",
-              )
-              this.partialDecodesCounter.add(1, {
-                feed_code: this.feedCode,
-              })
-            }
+            const value = await decode(new Uint8Array(arrayBuffer), config.url)
 
             return {
-              value: tripUpdates,
-              ttl: maxAgeMs >= 0 ? maxAgeMs : ms("15s"),
+              value,
+              ttl: Math.min(
+                maxAgeMs >= 0 ? maxAgeMs : ms("15s"),
+                maxCacheAgeMs,
+              ),
             }
           } finally {
             clearTimeout(timeoutId)
@@ -167,7 +217,7 @@ export class GtfsRealtimeService {
       if (response.status === "rejected") {
         this.logger.warn(
           { err: response.reason, url: fetchConfigs[index].url },
-          "Failed to fetch trip updates",
+          `Failed to fetch ${cacheKeyPrefix}`,
         )
 
         this.failuresCounter.add(1, {
@@ -184,6 +234,112 @@ export class GtfsRealtimeService {
     }
 
     return successfulResponses.flatMap((r) => r.value)
+  }
+
+  private decodeTripUpdates(data: Uint8Array, url: string): ITripUpdate[] {
+    const { tripUpdates, truncated } = decodeTripUpdatesOnly(data)
+
+    if (truncated) {
+      this.logger.warn(
+        { url, entitiesRecovered: tripUpdates.length },
+        "GTFS-RT response was truncated; using partially decoded trip updates",
+      )
+      this.partialDecodesCounter.add(1, {
+        feed_code: this.feedCode,
+      })
+    }
+
+    if (!this.stopIdRewrite) {
+      return tripUpdates
+    }
+
+    for (const tripUpdate of tripUpdates) {
+      for (const stopTimeUpdate of tripUpdate.stopTimeUpdate ?? []) {
+        if (stopTimeUpdate.stopId) {
+          stopTimeUpdate.stopId = this.rewriteStopId(stopTimeUpdate.stopId)
+        }
+      }
+    }
+
+    return tripUpdates
+  }
+
+  private async tripUpdatesFromVehiclePositions(
+    data: Uint8Array,
+    url: string,
+  ): Promise<ITripUpdate[]> {
+    const { vehiclePositions, feedTimestamp, truncated } =
+      decodeVehiclePositionsOnly(data)
+
+    if (truncated) {
+      this.logger.warn(
+        { url, entitiesRecovered: vehiclePositions.length },
+        "GTFS-RT response was truncated; using partially decoded vehicle positions",
+      )
+      this.partialDecodesCounter.add(1, {
+        feed_code: this.feedCode,
+      })
+    }
+
+    const now = this.dateTime.now().getTime() / 1000
+
+    const vehicles = vehiclePositions.flatMap((vehicle) => {
+      const tripId = vehicle.trip?.tripId
+      if (!tripId || !vehicle.stopId) {
+        return []
+      }
+
+      const observedAt = Number(vehicle.timestamp || feedTimestamp || now)
+      if (now - observedAt > MAX_VEHICLE_POSITION_AGE_MS / 1000) {
+        return []
+      }
+
+      return [
+        {
+          vehicle,
+          tripId,
+          stopId: this.rewriteStopId(vehicle.stopId),
+          observedAt,
+        },
+      ]
+    })
+
+    if (vehicles.length === 0) {
+      return []
+    }
+
+    const stopTimes = await listVehicleStopTimes.run(
+      {
+        tripIds: vehicles.map((v) => v.tripId),
+        stopIds: vehicles.map((v) => v.stopId),
+        nowUnixTime: now,
+      },
+      this.db,
+    )
+
+    const stopTimesByTrip = Map.groupBy(stopTimes, (st) => st.trip_id)
+
+    return vehicles.flatMap(({ vehicle, tripId, stopId, observedAt }) => {
+      const tripUpdate = tripUpdateFromVehiclePosition(
+        vehicle,
+        stopId,
+        stopTimesByTrip.get(tripId) ?? [],
+        observedAt,
+      )
+
+      return tripUpdate ? [tripUpdate] : []
+    })
+  }
+
+  private rewriteStopId(stopId: string): string {
+    if (!this.stopIdRewrite) {
+      return stopId
+    }
+
+    return stopId.replace(
+      this.stopIdRewrite.pattern,
+      this.stopIdRewrite.replacement,
+    )
   }
 
   resolveTripTimes(

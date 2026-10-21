@@ -136,7 +136,8 @@ export class GtfsService implements FeedProvider {
           feedStartDate: metadata?.feed_start_date,
           feedEndDate: metadata?.feed_end_date,
           feedVersion: metadata?.feed_version,
-          supportsGtfsRealtime: !!this.config.rtTripUpdates,
+          supportsGtfsRealtime:
+            !!this.config.rtTripUpdates || !!this.config.rtVehiclePositions,
         }
       },
       ms("5m"),

@@ -1,6 +1,6 @@
 # GTFS Configuration
 
-The Transit Tracker API supports [static GTFS feeds](https://gtfs.org/documentation/schedule/reference/) with one or more optional [GTFS-realtime Trip Updates](https://gtfs.org/documentation/realtime/feed-entities/trip-updates/) feeds to supplement the static schedule with real-time updates.
+The Transit Tracker API supports [static GTFS feeds](https://gtfs.org/documentation/schedule/reference/) with one or more optional [GTFS-realtime Trip Updates](https://gtfs.org/documentation/realtime/feed-entities/trip-updates/) feeds to supplement the static schedule with real-time updates. For agencies that only publish [Vehicle Positions](https://gtfs.org/documentation/realtime/feed-entities/vehicle-positions/), delays can be [estimated from those instead](#gtfs-realtime-vehicle-positions).
 
 To add a GTFS feed, add a feed to your `feeds.yaml` with a `gtfs:` section. Here is a basic example:
 
@@ -138,6 +138,34 @@ feeds:
           routeIds: ["SI"]
 ```
 
+## GTFS-Realtime Vehicle Positions
+
+Some agencies don't publish Trip Updates at all, only Vehicle Positions. For example, IDS JMK (Brno, Czech Republic) publishes the position of every vehicle along with its trip and the stop it's at or heading to, but no delays. You can configure an `rtVehiclePositions` feed (in the same formats as `rtTripUpdates`) and the API will estimate each trip's delay by comparing where the vehicle is with where the schedule says it should be:
+
+- A vehicle `STOPPED_AT` a stop is late by however long it has stayed past the scheduled departure.
+- A vehicle `IN_TRANSIT_TO` a stop is compared against the scheduled time at its position, interpolated by distance between the previous stop and the next one. A vehicle that reports the next stop before the previous stop's scheduled departure (e.g. laying over at the terminus) is assumed to be on time.
+
+The estimated delay applies to the vehicle's next stop and every stop after it. Vehicles that haven't reported for more than 5 minutes are ignored, and if a trip also has a Trip Update, the Trip Update takes precedence.
+
+```yaml
+feeds:
+  idsjmk:
+    name: IDS JMK
+    description: Brno, Czech Republic
+    gtfs:
+      quirks:
+        realtimeStopIdRewrite:
+          pattern: "^U0*(\\d+)Z0*(\\d+)$"
+          replacement: "U$1Z$2"
+      static:
+        url: https://kordis-jmk.cz/gtfs/gtfs.zip
+      rtVehiclePositions:
+        url: https://kordis-jmk.cz/gtfs/gtfsReal.dat
+```
+
+> [!NOTE]
+> IDS JMK serves its realtime feed with `Cache-Control: max-age=86400`. Set `GTFS_RT_MAX_CACHE_AGE` (e.g. `15s`) so vehicle positions aren't cached for longer than the default cap of 5 minutes.
+
 ## Quirks
 
 Even though GTFS is a standard, some agencies will have slight variations in their data that require special handling. You can enable certain "quirks" to account for these variations. Quirks are configured in the `gtfs.quirks` section of your feed configuration.
@@ -147,3 +175,16 @@ Even though GTFS is a standard, some agencies will have slight variations in the
 By default, the API will only apply GTFS-RT Trip Updates to trips that exactly match a trip ID in the static GTFS feed. However, some agencies (like NYC MTA) will use different trip IDs in their GTFS-RT feeds that don't exactly match the static feed. This is usually due to operational reasons.
 
 If `fuzzyMatchTripUpdates` is enabled, the API will instead match Trip Updates based on a partial match of the trip ID. For example, if a Trip Update has a trip ID of `12345`, it will match a static GTFS trip with an ID of `12345-ABCD`.
+
+### `realtimeStopIdRewrite`
+
+Some agencies use a different format for stop IDs in their GTFS-RT feeds than in their static feed. For example, IDS JMK's realtime feed zero-pads stop IDs (`U01266Z02`) while its static feed doesn't (`U1266Z2`).
+
+If `realtimeStopIdRewrite` is set, the API will rewrite every stop ID in Trip Updates and Vehicle Positions using a [regular expression](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/replace#specifying_a_string_as_the_replacement) before matching it against the static feed:
+
+```yaml
+quirks:
+  realtimeStopIdRewrite:
+    pattern: "^U0*(\\d+)Z0*(\\d+)$"
+    replacement: "U$1Z$2"
+```

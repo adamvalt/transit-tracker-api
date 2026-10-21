@@ -20,6 +20,7 @@ export async function setupFakeGtfsServer() {
   })
 
   let currentTripUpdates: GtfsRt.ITripUpdate[] = []
+  let currentVehiclePositions: GtfsRt.IVehiclePosition[] = []
   let simulateTripUpdatesFailure = false
 
   gtfsServerApp.get("/feeds/:feedName.zip", (req, res) => {
@@ -58,6 +59,25 @@ export async function setupFakeGtfsServer() {
     res.status(200).send(GtfsRt.FeedMessage.encode(message).finish())
   })
 
+  gtfsServerApp.get("/gtfs-rt/vehicle-positions", (_, res) => {
+    const message = new GtfsRt.FeedMessage({
+      header: {
+        gtfsRealtimeVersion: "2.0",
+        incrementality: GtfsRt.FeedHeader.Incrementality.FULL_DATASET,
+        timestamp: Math.floor(Date.now() / 1000),
+      },
+      entity: currentVehiclePositions.map((vehicle, idx) => ({
+        id: idx.toString(),
+        vehicle,
+      })),
+    })
+
+    res.setHeader("Content-Type", "application/x-protobuf")
+    res.setHeader("Cache-Control", "no-cache")
+
+    res.status(200).send(GtfsRt.FeedMessage.encode(message).finish())
+  })
+
   const server = await new Promise<Server>((resolve, reject) => {
     const server = gtfsServerApp.listen(3123, (err) => {
       if (err) {
@@ -72,9 +92,14 @@ export async function setupFakeGtfsServer() {
     currentTripUpdates = updates
   }
 
+  function setVehiclePositions(vehicles: GtfsRt.IVehiclePosition[]) {
+    currentVehiclePositions = vehicles
+  }
+
   return {
     server,
     setTripUpdates,
+    setVehiclePositions,
     setSimulateTripUpdatesFailure: (simulate: boolean) => {
       simulateTripUpdatesFailure = simulate
     },
