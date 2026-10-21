@@ -147,6 +147,8 @@ export class GtfsRealtimeService {
     }
 
     const minCacheAgeMs = env.duration("GTFS_RT_MIN_CACHE_AGE", -1)
+    // Some agencies send day-long max-ages on realtime feeds (e.g. IDS JMK)
+    const maxCacheAgeMs = env.duration("GTFS_RT_MAX_CACHE_AGE", ms("5m"))
 
     const responses = await Promise.allSettled(
       fetchConfigs.map((config) =>
@@ -199,7 +201,10 @@ export class GtfsRealtimeService {
 
             return {
               value,
-              ttl: maxAgeMs >= 0 ? maxAgeMs : ms("15s"),
+              ttl: Math.min(
+                maxAgeMs >= 0 ? maxAgeMs : ms("15s"),
+                maxCacheAgeMs,
+              ),
             }
           } finally {
             clearTimeout(timeoutId)

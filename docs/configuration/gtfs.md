@@ -163,6 +163,9 @@ feeds:
         url: https://kordis-jmk.cz/gtfs/gtfsReal.dat
 ```
 
+> [!NOTE]
+> IDS JMK serves its realtime feed with `Cache-Control: max-age=86400`. Set `GTFS_RT_MAX_CACHE_AGE` (e.g. `15s`) so vehicle positions aren't cached for longer than the default cap of 5 minutes.
+
 ## Quirks
 
 Even though GTFS is a standard, some agencies will have slight variations in their data that require special handling. You can enable certain "quirks" to account for these variations. Quirks are configured in the `gtfs.quirks` section of your feed configuration.
